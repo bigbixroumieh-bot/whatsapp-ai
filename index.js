@@ -101,7 +101,9 @@ function startWhatsApp() {
 
         await chat.sendStatePaused();
 
-        const messages = mistralResponse.split('\n\n').filter(m => m.trim().length > 0);
+        const messages = mistralResponse.split('
+
+').filter(m => m.trim().length > 0);
         for (const message of messages) {
             await msg.reply(message);
         }
@@ -120,7 +122,8 @@ async function callMistralAPI(prompt, senderName) {
                 messages: [
                     {
                         role: 'system',
-                        content: systemPrompt + '\nThe user\'s name is ' + senderName + '.'
+                        content: systemPrompt + '
+The user's name is ' + senderName + '.'
                     },
                     {
                         role: 'user',
