@@ -13,7 +13,7 @@ const MEMORY_LIMIT = 30;
 const MEMORY_TTL = 48 * 60 * 60 * 1000;
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant. If you need to perform a background action, respond ONLY with: [ACTION:actionName:params]acknowledgment message. Do NOT include the [ACTION:...] tag in the visible message. The user's name will be provided in the context.";
+let systemPrompt = "You are a helpful assistant. If you need to perform a background action, respond ONLY with the acknowledgment message after [ACTION:actionName:params]. Do NOT include the [ACTION:...] tag in the visible message. Example format: [ACTION:checkDatabase:menu]Let me check our menu for you. The user's name will be provided in the context.";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -99,7 +99,7 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt + NL + "If you need to perform a background action, respond ONLY with: [ACTION:actionName:params]acknowledgment message. Do NOT include the [ACTION:...] tag in the visible message.";
+        systemPrompt = prompt + NL + "If you need to perform a background action, respond ONLY with the acknowledgment message after [ACTION:actionName:params]. Do NOT include the [ACTION:...] tag in the visible message. Example: [ACTION:checkDatabase:menu]Let me check our menu for you.";
         console.log('System prompt updated');
         showMenu();
     });
@@ -243,31 +243,13 @@ async function processMessage(msg) {
 
     console.log('Received message from ' + chatId + ': ' + messageText);
 
-    let chat;
+    const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+    addToMemory(chatId, 'user', messageText);
+    const memory = getMemory(chatId);
+    const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
+    
     try {
-        chat = await client.getChatById(chatId);
-    } catch (err) {
-        console.error('Error getting chat:', err);
-        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-        const mistralResponse = await callMistralAPI(messageText, senderName);
-        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-        for (const message of messages) {
-            await msg.reply(message);
-        }
-        addToMemory(chatId, 'assistant', mistralResponse);
-        return;
-    }
-
-    try {
-        await chat.sendStateTyping();
-
-        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-        addToMemory(chatId, 'user', messageText);
-        const memory = getMemory(chatId);
-        const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
         const mistralResponse = await callMistralAPIWithContext(messageText, senderName, contextMessages);
-
-        await chat.sendStatePaused();
 
         const action = parseAction(mistralResponse);
         if (action) {
@@ -283,6 +265,10 @@ async function processMessage(msg) {
             return;
         }
 
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
+        await chat.sendStatePaused();
+
         const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
         for (const message of messages) {
             await msg.reply(message);
@@ -290,11 +276,18 @@ async function processMessage(msg) {
         addToMemory(chatId, 'assistant', mistralResponse);
     } catch (err) {
         console.error('Error processing message:', err);
-        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-        const mistralResponse = await callMistralAPI(messageText, senderName);
-        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-        for (const message of messages) {
-            await msg.reply(message);
+        try {
+            const chat = await msg.getChat();
+            await chat.sendStateTyping();
+            await chat.sendStatePaused();
+            const mistralResponse = await callMistralAPI(messageText, senderName);
+            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+            for (const message of messages) {
+                await msg.reply(message);
+            }
+        } catch (fallbackErr) {
+            console.error('Fallback error:', fallbackErr);
+            await msg.reply('Sorry, I encountered an error processing your request.');
         }
     }
 }
