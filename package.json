@@ -9,6 +9,7 @@
   "dependencies": {
     "whatsapp-web.js": "^1.23.0",
     "qrcode": "^1.5.3",
-    "axios": "^1.6.2"
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1"
   }
 }
