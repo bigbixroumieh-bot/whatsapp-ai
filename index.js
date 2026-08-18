@@ -100,22 +100,32 @@ function setSystemPrompt() {
 }
 
 function parseAction(response) {
-    const match = response.match(/[ACTION:(w+):(.+?)]/);
-    if (match) {
-        const actionName = match[1];
-        const params = match[2];
-        const ackMessage = response.replace(/[ACTION:w+:.*?]/, '').trim();
-        return { action: actionName, params, ackMessage };
-    }
-    return null;
+    const prefix = '[ACTION:';
+    const suffix = ']';
+    const startIdx = response.indexOf(prefix);
+    if (startIdx === -1) return null;
+    const endIdx = response.indexOf(suffix, startIdx + prefix.length);
+    if (endIdx === -1) return null;
+    const rest = response.substring(startIdx + prefix.length, endIdx);
+    const colonIdx = rest.indexOf(':');
+    if (colonIdx === -1) return null;
+    const actionName = rest.substring(0, colonIdx);
+    const params = rest.substring(colonIdx + 1);
+    const ackMessage = response.substring(endIdx + suffix.length).trim();
+    return { action: actionName, params, ackMessage };
 }
 
 function parseReminderResponse(response) {
-    const match = response.match(/[REMIND:(d{4}-d{2}-d{2}Td{2}:d{2})](.+)/);
-    if (match) {
-        return { type: 'reminder', datetime: match[1], message: match[2].trim() };
-    }
-    return null;
+    const prefix = '[REMIND:';
+    const suffix = ']';
+    const startIdx = response.indexOf(prefix);
+    if (startIdx === -1) return null;
+    const endIdx = response.indexOf(suffix, startIdx + prefix.length);
+    if (endIdx === -1) return null;
+    const datetime = response.substring(startIdx + prefix.length, endIdx);
+    const message = response.substring(endIdx + suffix.length).trim();
+    if (!/^d{4}-d{2}-d{2}Td{2}:d{2}$/.test(datetime)) return null;
+    return { type: 'reminder', datetime, message };
 }
 
 function scheduleReminder(chatId, datetime, message) {
