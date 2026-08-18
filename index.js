@@ -26,7 +26,6 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
-const pendingWaits = new Map();
 const scheduledReminders = new Map();
 
 function showMenu() {
@@ -67,7 +66,7 @@ function parseWaitResponse(response) {
     const waitMatch = response.match(/[WAIT:(d+)]/);
     if (waitMatch) {
         const seconds = parseInt(waitMatch[1]);
-        const message = response.replace(/[WAIT:d+]/, '').trim();
+        const message = response.replace(/[WAIT:d+]/g, '').trim();
         return { type: 'wait', seconds, message };
     }
     return { type: 'normal', message: response };
