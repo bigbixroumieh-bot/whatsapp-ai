@@ -100,18 +100,20 @@ function setSystemPrompt() {
 }
 
 function parseAction(response) {
-    const match = response.match(/[ACTION:(w+):(.+?)]/);
+    const actionRegex = new RegExp('[ACTION:(\w+):(.+?)]');
+    const match = response.match(actionRegex);
     if (match) {
         const actionName = match[1];
         const params = match[2];
-        const ackMessage = response.replace(/[ACTION:w+:.*?]/, '').trim();
+        const ackMessage = response.replace(new RegExp('[ACTION:\w+:.*?]'), '').trim();
         return { action: actionName, params, ackMessage };
     }
     return null;
 }
 
 function parseReminderResponse(response) {
-    const remindMatch = response.match(/[REMIND:(d{4}-d{2}-d{2}Td{2}:d{2})](.+)/);
+    const reminderRegex = new RegExp('[REMIND:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})](.+)');
+    const remindMatch = response.match(reminderRegex);
     if (remindMatch) {
         return { type: 'reminder', datetime: remindMatch[1], message: remindMatch[2].trim() };
     }
