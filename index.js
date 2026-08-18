@@ -13,7 +13,7 @@ const MEMORY_LIMIT = 30;
 const MEMORY_TTL = 48 * 60 * 60 * 1000;
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant with full memory of our conversation. When you need to perform a background action (like checking a database or searching), respond with the format: [ACTION:actionName:params]your natural acknowledgment message. Example: [ACTION:checkDatabase:menu]Let me check our menu for you. The user's name will be in the context.";
+let systemPrompt = "You are a helpful assistant. If you need to perform a background action, respond ONLY with: [ACTION:actionName:params]acknowledgment message. Do NOT include the [ACTION:...] tag in the visible message. The user's name will be provided in the context.";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -30,19 +30,25 @@ const rl = readline.createInterface({
 
 const chatMemory = new Map();
 const scheduledReminders = new Map();
+const asyncState = new Map();
 
 const actions = {
     searchWeb: async (query) => {
         console.log('Performing web search for:', query);
-        return 'Web search result for: ' + query;
+        return 'Search results for: ' + query;
     },
     checkDatabase: async (query) => {
         console.log('Querying database for:', query);
-        return 'Database result: ' + query;
+        return 'Database result for: ' + query;
     }
 };
 
+function cleanChatId(chatId) {
+    return chatId.split('@')[0];
+}
+
 function addToMemory(chatId, role, content) {
+    chatId = cleanChatId(chatId);
     if (!chatMemory.has(chatId)) {
         chatMemory.set(chatId, []);
     }
@@ -57,6 +63,7 @@ function addToMemory(chatId, role, content) {
 }
 
 function getMemory(chatId) {
+    chatId = cleanChatId(chatId);
     if (!chatMemory.has(chatId)) {
         return [];
     }
@@ -92,7 +99,7 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt + NL + "You have full memory of our conversation. When you need to perform a background action, use: [ACTION:actionName:params]your natural message.";
+        systemPrompt = prompt + NL + "If you need to perform a background action, respond ONLY with: [ACTION:actionName:params]acknowledgment message. Do NOT include the [ACTION:...] tag in the visible message.";
         console.log('System prompt updated');
         showMenu();
     });
@@ -128,6 +135,7 @@ function parseReminderResponse(response) {
 }
 
 function scheduleReminder(chatId, datetime, message) {
+    chatId = cleanChatId(chatId);
     const now = new Date();
     const remindDate = new Date(datetime);
     const delay = remindDate.getTime() - now.getTime();
@@ -146,42 +154,39 @@ function scheduleReminder(chatId, datetime, message) {
         }
     }, delay);
     scheduledReminders.set(reminderKey, timeout);
-    console.log('Reminder scheduled for ' + datetime);
+    console.log('Reminder scheduled for ' + datetime + ': ' + message);
 }
 
 async function handleAsyncAction(msg, actionName, params, ackMessage) {
-    const chatId = msg.from;
-    
+    const chatId = cleanChatId(msg.from);
     await msg.reply(ackMessage);
-    addToMemory(chatId, 'assistant', ackMessage);
-    
+    asyncState.set(chatId, { action: actionName, params, timestamp: Date.now() });
     try {
         if (actions[actionName]) {
-            console.log('Executing action:', actionName, 'params:', params);
+            console.log('Performing action:', actionName, 'with params:', params);
             const result = await actions[actionName](params);
-            
             const memory = getMemory(chatId);
             const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
             contextMessages.push({
                 role: 'assistant',
-                content: 'Action ' + actionName + ' completed. Result: ' + result
+                content: 'Action ' + actionName + ' completed with result: ' + result
             });
-            
             const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
             const finalResponse = await callMistralAPIWithContext(
-                'Action completed. Provide final response.',
+                'Action completed. Provide final response to user.',
                 senderName,
                 contextMessages
             );
-            
             await msg.reply(finalResponse);
             addToMemory(chatId, 'assistant', finalResponse);
         } else {
-            await msg.reply('Sorry, I cannot perform that action.');
+            await msg.reply('Action ' + actionName + ' is not implemented.');
         }
     } catch (err) {
-        console.error('Action error:', err);
-        await msg.reply('Sorry, there was an error performing that action.');
+        console.error('Error in async action:', err);
+        await msg.reply('Error performing action: ' + err.message);
+    } finally {
+        asyncState.delete(chatId);
     }
 }
 
@@ -217,8 +222,80 @@ async function callMistralAPIWithContext(prompt, senderName, contextMessages) {
         );
         return response.data.choices[0].message.content;
     } catch (error) {
-        console.error('Mistral API error:', error.response?.data || error.message);
-        return 'Sorry, I encountered an error.';
+        console.error('Error calling Mistral API:', error.response?.data || error.message);
+        return 'Sorry, I encountered an error processing your request.';
+    }
+}
+
+async function processMessage(msg) {
+    const chatId = cleanChatId(msg.from);
+    const messageText = msg.body.trim();
+
+    if (messageText.toLowerCase() === '@ai on') {
+        aiEnabledChats.add(chatId);
+        await msg.reply('AI enabled for this chat. Type your messages and I will respond using Mistral AI.');
+        return;
+    }
+
+    if (!aiEnabledChats.has(chatId)) {
+        return;
+    }
+
+    console.log('Received message from ' + chatId + ': ' + messageText);
+
+    let chat;
+    try {
+        chat = await client.getChatById(chatId);
+    } catch (err) {
+        console.error('Error getting chat:', err);
+        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+        const mistralResponse = await callMistralAPI(messageText, senderName);
+        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+        for (const message of messages) {
+            await msg.reply(message);
+        }
+        addToMemory(chatId, 'assistant', mistralResponse);
+        return;
+    }
+
+    try {
+        await chat.sendStateTyping();
+
+        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+        addToMemory(chatId, 'user', messageText);
+        const memory = getMemory(chatId);
+        const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
+        const mistralResponse = await callMistralAPIWithContext(messageText, senderName, contextMessages);
+
+        await chat.sendStatePaused();
+
+        const action = parseAction(mistralResponse);
+        if (action) {
+            await handleAsyncAction(msg, action.action, action.params, action.ackMessage);
+            return;
+        }
+
+        const reminderResult = parseReminderResponse(mistralResponse);
+        if (reminderResult) {
+            await msg.reply(reminderResult.message);
+            scheduleReminder(chatId, reminderResult.datetime, reminderResult.message);
+            addToMemory(chatId, 'assistant', reminderResult.message);
+            return;
+        }
+
+        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+        for (const message of messages) {
+            await msg.reply(message);
+        }
+        addToMemory(chatId, 'assistant', mistralResponse);
+    } catch (err) {
+        console.error('Error processing message:', err);
+        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+        const mistralResponse = await callMistralAPI(messageText, senderName);
+        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+        for (const message of messages) {
+            await msg.reply(message);
+        }
     }
 }
 
@@ -231,64 +308,21 @@ function startWhatsApp() {
             const qrString = await qr.toString(qrCode, { type: 'terminal', small: true });
             console.log(qrString);
         } catch (err) {
-            console.error('QR error:', err);
+            console.error('Error generating QR code:', err);
         }
     });
 
     client.on('ready', () => {
         console.log('\nClient is ready!');
-        console.log('Type @ai on in any WhatsApp chat to enable AI.');
+        console.log('Type @ai on in any WhatsApp chat to enable the AI for that chat.');
     });
 
     client.on('message', async (msg) => {
-        const chatId = msg.from;
-        const messageText = msg.body.trim();
-
-        if (messageText.toLowerCase() === '@ai on') {
-            aiEnabledChats.add(chatId);
-            await msg.reply('AI enabled. I have memory of our conversation.');
-            return;
-        }
-
-        if (!aiEnabledChats.has(chatId)) {
-            return;
-        }
-
-        console.log('Message from ' + chatId + ': ' + messageText);
-
-        try {
-            const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-            addToMemory(chatId, 'user', messageText);
-            const memory = getMemory(chatId);
-            const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
-            const mistralResponse = await callMistralAPIWithContext(messageText, senderName, contextMessages);
-
-            const action = parseAction(mistralResponse);
-            if (action) {
-                await handleAsyncAction(msg, action.action, action.params, action.ackMessage);
-                return;
-            }
-
-            const reminderResult = parseReminderResponse(mistralResponse);
-            if (reminderResult) {
-                await msg.reply(reminderResult.message);
-                scheduleReminder(chatId, reminderResult.datetime, reminderResult.message);
-                addToMemory(chatId, 'assistant', reminderResult.message);
-                return;
-            }
-
-            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-            for (const message of messages) {
-                await msg.reply(message);
-            }
-            addToMemory(chatId, 'assistant', mistralResponse);
-        } catch (err) {
-            console.error('Message error:', err);
-        }
+        await processMessage(msg);
     });
 
     client.initialize();
-    console.log('WhatsApp client initialized. Waiting for QR...');
+    console.log('WhatsApp client initialized. Waiting for QR code...');
 }
 
 process.on('SIGINT', () => {
