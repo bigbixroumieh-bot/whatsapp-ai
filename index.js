@@ -121,8 +121,7 @@ async function callMistralAPI(prompt, senderName) {
                 messages: [
                     {
                         role: 'system',
-                        content: systemPrompt + '
-The user's name is ' + senderName + '.'
+                        content: systemPrompt + NL + "The user's name is " + senderName + "."
                     },
                     {
                         role: 'user',
