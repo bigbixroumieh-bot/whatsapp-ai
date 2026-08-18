@@ -13,7 +13,7 @@ const MEMORY_LIMIT = 30;
 const MEMORY_TTL = 48 * 60 * 60 * 1000;
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant. If you need to perform a background action, respond with: [ACTION:actionName:params]acknowledgment message. The user's name will be provided in the context.";
+let systemPrompt = "You are a helpful assistant with memory of our conversation. If you need to perform a background action to get information, respond ONLY with the acknowledgment message (do NOT include the [ACTION:...] tag in your response). The system will handle the action automatically. The user's name will be provided in the context.";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -93,7 +93,7 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt + NL + "If you need to perform a background action, respond with: [ACTION:actionName:params]acknowledgment message.";
+        systemPrompt = prompt + NL + "You have memory of our conversation. If you need to perform a background action, respond ONLY with the natural acknowledgment message (do NOT include any [ACTION:...] tags). The system will handle actions automatically.";
         console.log('System prompt updated');
         showMenu();
     });
@@ -244,7 +244,7 @@ function startWhatsApp() {
 
         if (messageText.toLowerCase() === '@ai on') {
             aiEnabledChats.add(chatId);
-            await msg.reply('AI enabled for this chat. Type your messages and I will respond using Mistral AI.');
+            await msg.reply('AI enabled for this chat. Type your messages and I will respond using Mistral AI with memory.');
             return;
         }
 
@@ -255,16 +255,11 @@ function startWhatsApp() {
         console.log('Received message from ' + chatId + ': ' + messageText);
 
         try {
-            const chat = await client.getChatById(chatId);
-            await chat.sendStateTyping();
-
             const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
             addToMemory(chatId, 'user', messageText);
             const memory = getMemory(chatId);
             const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
             const mistralResponse = await callMistralAPIWithContext(messageText, senderName, contextMessages);
-
-            await chat.sendStatePaused();
 
             const action = parseAction(mistralResponse);
             if (action) {
@@ -287,11 +282,16 @@ function startWhatsApp() {
             addToMemory(chatId, 'assistant', mistralResponse);
         } catch (err) {
             console.error('Error processing message:', err);
-            const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-            const mistralResponse = await callMistralAPI(messageText, senderName);
-            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-            for (const message of messages) {
-                await msg.reply(message);
+            try {
+                const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+                const mistralResponse = await callMistralAPI(messageText, senderName);
+                const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+                for (const message of messages) {
+                    await msg.reply(message);
+                }
+                addToMemory(chatId, 'assistant', mistralResponse);
+            } catch (fallbackErr) {
+                console.error('Fallback error:', fallbackErr);
             }
         }
     });
