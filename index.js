@@ -94,17 +94,27 @@ function startWhatsApp() {
 
         console.log('Received message from ' + chatId + ': ' + messageText);
 
-        const chat = await msg.getChat();
-        await chat.sendStateTyping();
+        try {
+            const chat = await client.getChatById(chatId);
+            await chat.sendStateTyping();
 
-        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-        const mistralResponse = await callMistralAPI(messageText, senderName);
+            const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+            const mistralResponse = await callMistralAPI(messageText, senderName);
 
-        await chat.sendStatePaused();
+            await chat.sendStatePaused();
 
-        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-        for (const message of messages) {
-            await msg.reply(message);
+            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+            for (const message of messages) {
+                await msg.reply(message);
+            }
+        } catch (err) {
+            console.error('Error with typing indicator:', err);
+            const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+            const mistralResponse = await callMistralAPI(messageText, senderName);
+            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+            for (const message of messages) {
+                await msg.reply(message);
+            }
         }
     });
 
