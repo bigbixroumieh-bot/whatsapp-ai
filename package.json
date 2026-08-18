@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-mistral-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp AI Chatbot using Mistral API and whatsapp-web.js",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "^1.23.0",
+    "qrcode-terminal": "^0.12.0",
+    "axios": "^1.6.2"
+  }
+}
