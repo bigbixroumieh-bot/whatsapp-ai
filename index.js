@@ -8,6 +8,7 @@ const readline = require('readline');
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 const MISTRAL_API_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
 const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistral-small';
+const NL = String.fromCharCode(10);
 
 const aiEnabledChats = new Set();
 let systemPrompt = "You are a helpful assistant.";
@@ -101,9 +102,7 @@ function startWhatsApp() {
 
         await chat.sendStatePaused();
 
-        const messages = mistralResponse.split(/
-s*
-/).filter(m => m.trim().length > 0);
+        const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
         for (const message of messages) {
             await msg.reply(message);
         }
