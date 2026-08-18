@@ -1,9 +1,11 @@
+require('dotenv').config();
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qr = require('qrcode');
 const axios = require('axios');
 const readline = require('readline');
 
-const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || 'your_mistral_api_key';
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 const MISTRAL_API_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
 
 const aiEnabledChats = new Set();
