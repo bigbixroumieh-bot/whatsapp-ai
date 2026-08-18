@@ -11,7 +11,7 @@ const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistral-small';
 const NL = String.fromCharCode(10);
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant.";
+let systemPrompt = "You are a helpful assistant. If you need time to check something, respond with: [WAIT:seconds]your message. If user asks for a reminder, respond with: [REMIND:YYYY-MM-DDTHH:MM]reminder message";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -25,6 +25,9 @@ const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
+
+const pendingWaits = new Map();
+const scheduledReminders = new Map();
 
 function showMenu() {
     console.log('\n=== WhatsApp AI Bot ===');
@@ -54,10 +57,53 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt;
+        systemPrompt = prompt + NL + "If you need time to check something, respond with: [WAIT:seconds]your message. If user asks for a reminder, respond with: [REMIND:YYYY-MM-DDTHH:MM]reminder message";
         console.log('System prompt updated');
         showMenu();
     });
+}
+
+function parseWaitResponse(response) {
+    const waitMatch = response.match(/[WAIT:(d+)]/);
+    if (waitMatch) {
+        const seconds = parseInt(waitMatch[1]);
+        const message = response.replace(/[WAIT:d+]/, '').trim();
+        return { type: 'wait', seconds, message };
+    }
+    return { type: 'normal', message: response };
+}
+
+function parseReminderResponse(response) {
+    const remindMatch = response.match(/[REMIND:(d{4}-d{2}-d{2}Td{2}:d{2})](.+)/);
+    if (remindMatch) {
+        return { type: 'reminder', datetime: remindMatch[1], message: remindMatch[2].trim() };
+    }
+    return null;
+}
+
+function scheduleReminder(chatId, datetime, message) {
+    const now = new Date();
+    const remindDate = new Date(datetime);
+    const delay = remindDate.getTime() - now.getTime();
+    
+    if (delay <= 0) {
+        console.log('Reminder time is in the past');
+        return;
+    }
+    
+    const reminderKey = chatId + ':' + datetime;
+    const timeout = setTimeout(async () => {
+        try {
+            const chat = await client.getChatById(chatId);
+            await chat.sendMessage(message);
+            scheduledReminders.delete(reminderKey);
+        } catch (err) {
+            console.error('Error sending reminder:', err);
+        }
+    }, delay);
+    
+    scheduledReminders.set(reminderKey, timeout);
+    console.log('Reminder scheduled for ' + datetime + ': ' + message);
 }
 
 function startWhatsApp() {
@@ -103,9 +149,29 @@ function startWhatsApp() {
 
             await chat.sendStatePaused();
 
-            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-            for (const message of messages) {
-                await msg.reply(message);
+            const waitResult = parseWaitResponse(mistralResponse);
+            const reminderResult = parseReminderResponse(mistralResponse);
+
+            if (waitResult.type === 'wait') {
+                await msg.reply("Alright, be right back, checking...");
+                setTimeout(async () => {
+                    try {
+                        const messages = waitResult.message.split(NL + NL).filter(m => m.trim().length > 0);
+                        for (const message of messages) {
+                            await msg.reply(message);
+                        }
+                    } catch (err) {
+                        console.error('Error sending delayed message:', err);
+                    }
+                }, waitResult.seconds * 1000);
+            } else if (reminderResult) {
+                await msg.reply("Got it! I'll remind you.");
+                scheduleReminder(chatId, reminderResult.datetime, reminderResult.message);
+            } else {
+                const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+                for (const message of messages) {
+                    await msg.reply(message);
+                }
             }
         } catch (err) {
             console.error('Error with typing indicator:', err);
@@ -156,6 +222,9 @@ async function callMistralAPI(prompt, senderName) {
 
 process.on('SIGINT', () => {
     console.log('\nShutting down...');
+    for (const timeout of scheduledReminders.values()) {
+        clearTimeout(timeout);
+    }
     client.destroy();
     rl.close();
     process.exit(0);
