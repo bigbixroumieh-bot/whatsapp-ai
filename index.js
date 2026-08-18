@@ -9,9 +9,11 @@ const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 const MISTRAL_API_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
 const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistral-small';
 const NL = String.fromCharCode(10);
+const MEMORY_LIMIT = 30;
+const MEMORY_TTL = 48 * 60 * 60 * 1000;
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant. If you need time to think or check something, format your response as: [WAIT:seconds]acknowledgment message|final message. Example: [WAIT:5]Let me check for you|Here is the information you requested.";
+let systemPrompt = "You are a helpful assistant. If you need to perform a background action, respond with: [ACTION:actionName:params]acknowledgment message. The user's name will be provided in the context.";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -26,7 +28,42 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
+const chatMemory = new Map();
 const scheduledReminders = new Map();
+const asyncState = new Map();
+
+const actions = {
+    searchWeb: async (query) => {
+        console.log('Performing web search for:', query);
+        return 'Search results for: ' + query;
+    },
+    checkDatabase: async (query) => {
+        console.log('Querying database for:', query);
+        return 'Database result for: ' + query;
+    }
+};
+
+function addToMemory(chatId, role, content) {
+    if (!chatMemory.has(chatId)) {
+        chatMemory.set(chatId, []);
+    }
+    const memory = chatMemory.get(chatId);
+    memory.push({ role, content, timestamp: Date.now() });
+    if (memory.length > MEMORY_LIMIT) {
+        memory.shift();
+    }
+    const now = Date.now();
+    const filtered = memory.filter(msg => now - msg.timestamp < MEMORY_TTL);
+    chatMemory.set(chatId, filtered);
+}
+
+function getMemory(chatId) {
+    if (!chatMemory.has(chatId)) {
+        return [];
+    }
+    const now = Date.now();
+    return chatMemory.get(chatId).filter(msg => now - msg.timestamp < MEMORY_TTL);
+}
 
 function showMenu() {
     console.log('\n=== WhatsApp AI Bot ===');
@@ -56,23 +93,21 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt + NL + "If you need time to think or check something, format your response as: [WAIT:seconds]acknowledgment message|final message. Example: [WAIT:5]Let me check for you|Here is the information you requested.";
+        systemPrompt = prompt + NL + "If you need to perform a background action, respond with: [ACTION:actionName:params]acknowledgment message.";
         console.log('System prompt updated');
         showMenu();
     });
 }
 
-function parseWaitResponse(response) {
-    const waitMatch = response.match(/[WAIT:(d+)]([^|]+)|(.+)/);
-    if (waitMatch) {
-        return { 
-            type: 'wait', 
-            seconds: parseInt(waitMatch[1]), 
-            ackMessage: waitMatch[2].trim(),
-            finalMessage: waitMatch[3].trim() 
-        };
+function parseAction(response) {
+    const match = response.match(/[ACTION:(w+):(.+?)]/);
+    if (match) {
+        const actionName = match[1];
+        const params = match[2];
+        const ackMessage = response.replace(/[ACTION:w+:.*?]/, '').trim();
+        return { action: actionName, params, ackMessage };
     }
-    return { type: 'normal', message: response };
+    return null;
 }
 
 function parseReminderResponse(response) {
@@ -87,12 +122,10 @@ function scheduleReminder(chatId, datetime, message) {
     const now = new Date();
     const remindDate = new Date(datetime);
     const delay = remindDate.getTime() - now.getTime();
-    
     if (delay <= 0) {
         console.log('Reminder time is in the past');
         return;
     }
-    
     const reminderKey = chatId + ':' + datetime;
     const timeout = setTimeout(async () => {
         try {
@@ -103,9 +136,78 @@ function scheduleReminder(chatId, datetime, message) {
             console.error('Error sending reminder:', err);
         }
     }, delay);
-    
     scheduledReminders.set(reminderKey, timeout);
     console.log('Reminder scheduled for ' + datetime + ': ' + message);
+}
+
+async function handleAsyncAction(msg, actionName, params, ackMessage) {
+    const chatId = msg.from;
+    await msg.reply(ackMessage);
+    asyncState.set(chatId, { action: actionName, params, timestamp: Date.now() });
+    try {
+        if (actions[actionName]) {
+            console.log('Performing action:', actionName, 'with params:', params);
+            const result = await actions[actionName](params);
+            const memory = getMemory(chatId);
+            const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
+            contextMessages.push({
+                role: 'assistant',
+                content: 'Action ' + actionName + ' completed with result: ' + result
+            });
+            const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+            const finalResponse = await callMistralAPIWithContext(
+                'Action completed. Provide final response to user.',
+                senderName,
+                contextMessages
+            );
+            await msg.reply(finalResponse);
+            addToMemory(chatId, 'assistant', finalResponse);
+        } else {
+            await msg.reply('Action ' + actionName + ' is not implemented.');
+        }
+    } catch (err) {
+        console.error('Error in async action:', err);
+        await msg.reply('Error performing action: ' + err.message);
+    } finally {
+        asyncState.delete(chatId);
+    }
+}
+
+async function callMistralAPI(prompt, senderName) {
+    return callMistralAPIWithContext(prompt, senderName, []);
+}
+
+async function callMistralAPIWithContext(prompt, senderName, contextMessages) {
+    try {
+        const messages = [
+            {
+                role: 'system',
+                content: systemPrompt + NL + "The user's name is " + senderName + "."
+            },
+            ...contextMessages,
+            {
+                role: 'user',
+                content: prompt,
+            }
+        ];
+        const response = await axios.post(
+            MISTRAL_API_ENDPOINT,
+            {
+                model: MISTRAL_MODEL,
+                messages: messages,
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + MISTRAL_API_KEY,
+                },
+            }
+        );
+        return response.data.choices[0].message.content;
+    } catch (error) {
+        console.error('Error calling Mistral API:', error.response?.data || error.message);
+        return 'Sorry, I encountered an error processing your request.';
+    }
 }
 
 function startWhatsApp() {
@@ -147,36 +249,34 @@ function startWhatsApp() {
             await chat.sendStateTyping();
 
             const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
-            const mistralResponse = await callMistralAPI(messageText, senderName);
+            addToMemory(chatId, 'user', messageText);
+            const memory = getMemory(chatId);
+            const contextMessages = memory.map(m => ({ role: m.role, content: m.content }));
+            const mistralResponse = await callMistralAPIWithContext(messageText, senderName, contextMessages);
 
             await chat.sendStatePaused();
 
-            const waitResult = parseWaitResponse(mistralResponse);
-            const reminderResult = parseReminderResponse(mistralResponse);
+            const action = parseAction(mistralResponse);
+            if (action) {
+                await handleAsyncAction(msg, action.action, action.params, action.ackMessage);
+                return;
+            }
 
-            if (waitResult.type === 'wait') {
-                await msg.reply(waitResult.ackMessage);
-                setTimeout(async () => {
-                    try {
-                        const messages = waitResult.finalMessage.split(NL + NL).filter(m => m.trim().length > 0);
-                        for (const message of messages) {
-                            await msg.reply(message);
-                        }
-                    } catch (err) {
-                        console.error('Error sending delayed message:', err);
-                    }
-                }, waitResult.seconds * 1000);
-            } else if (reminderResult) {
+            const reminderResult = parseReminderResponse(mistralResponse);
+            if (reminderResult) {
                 await msg.reply(reminderResult.message);
                 scheduleReminder(chatId, reminderResult.datetime, reminderResult.message);
-            } else {
-                const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
-                for (const message of messages) {
-                    await msg.reply(message);
-                }
+                addToMemory(chatId, 'assistant', reminderResult.message);
+                return;
             }
+
+            const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
+            for (const message of messages) {
+                await msg.reply(message);
+            }
+            addToMemory(chatId, 'assistant', mistralResponse);
         } catch (err) {
-            console.error('Error with typing indicator:', err);
+            console.error('Error processing message:', err);
             const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
             const mistralResponse = await callMistralAPI(messageText, senderName);
             const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
@@ -188,38 +288,6 @@ function startWhatsApp() {
 
     client.initialize();
     console.log('WhatsApp client initialized. Waiting for QR code...');
-}
-
-async function callMistralAPI(prompt, senderName) {
-    try {
-        const response = await axios.post(
-            MISTRAL_API_ENDPOINT,
-            {
-                model: MISTRAL_MODEL,
-                messages: [
-                    {
-                        role: 'system',
-                        content: systemPrompt + NL + "The user's name is " + senderName + "."
-                    },
-                    {
-                        role: 'user',
-                        content: prompt,
-                    },
-                ],
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + MISTRAL_API_KEY,
-                },
-            }
-        );
-
-        return response.data.choices[0].message.content;
-    } catch (error) {
-        console.error('Error calling Mistral API:', error.response?.data || error.message);
-        return 'Sorry, I encountered an error processing your request.';
-    }
 }
 
 process.on('SIGINT', () => {
