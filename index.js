@@ -7,6 +7,7 @@ const readline = require('readline');
 
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 const MISTRAL_API_ENDPOINT = 'https://api.mistral.ai/v1/chat/completions';
+const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistral-small';
 
 const aiEnabledChats = new Set();
 let systemPrompt = "You are a helpful assistant.";
@@ -92,9 +93,12 @@ function startWhatsApp() {
 
         console.log('Received message from ' + chatId + ': ' + messageText);
 
+        // Send acknowledgment message first
+        await msg.reply("Sure! I'll check for you");
+
+        // Then process and send the actual response
         const mistralResponse = await callMistralAPI(messageText);
         console.log('Mistral response:', mistralResponse);
-
         await msg.reply(mistralResponse);
     });
 
@@ -107,7 +111,7 @@ async function callMistralAPI(prompt) {
         const response = await axios.post(
             MISTRAL_API_ENDPOINT,
             {
-                model: 'mistral-tiny',
+                model: MISTRAL_MODEL,
                 messages: [
                     {
                         role: 'system',
