@@ -101,9 +101,9 @@ function startWhatsApp() {
 
         await chat.sendStatePaused();
 
-        const messages = mistralResponse.split('
-
-').filter(m => m.trim().length > 0);
+        const messages = mistralResponse.split(/
+s*
+/).filter(m => m.trim().length > 0);
         for (const message of messages) {
             await msg.reply(message);
         }
