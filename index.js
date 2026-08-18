@@ -93,20 +93,25 @@ function startWhatsApp() {
 
         console.log('Received message from ' + chatId + ': ' + messageText);
 
-        // Send acknowledgment message first
-        await msg.reply("Sure! I'll check for you");
+        const chat = await msg.getChat();
+        await chat.sendStateTyping();
 
-        // Then process and send the actual response
-        const mistralResponse = await callMistralAPI(messageText);
-        console.log('Mistral response:', mistralResponse);
-        await msg.reply(mistralResponse);
+        const senderName = msg._data.notifyName || msg._data.pushName || msg.from;
+        const mistralResponse = await callMistralAPI(messageText, senderName);
+
+        await chat.sendStatePaused();
+
+        const messages = mistralResponse.split('\n\n').filter(m => m.trim().length > 0);
+        for (const message of messages) {
+            await msg.reply(message);
+        }
     });
 
     client.initialize();
     console.log('WhatsApp client initialized. Waiting for QR code...');
 }
 
-async function callMistralAPI(prompt) {
+async function callMistralAPI(prompt, senderName) {
     try {
         const response = await axios.post(
             MISTRAL_API_ENDPOINT,
@@ -115,7 +120,7 @@ async function callMistralAPI(prompt) {
                 messages: [
                     {
                         role: 'system',
-                        content: systemPrompt
+                        content: systemPrompt + '\nThe user\'s name is ' + senderName + '.'
                     },
                     {
                         role: 'user',
