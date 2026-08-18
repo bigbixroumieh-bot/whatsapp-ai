@@ -11,7 +11,7 @@ const MISTRAL_MODEL = process.env.MISTRAL_MODEL || 'mistral-small';
 const NL = String.fromCharCode(10);
 
 const aiEnabledChats = new Set();
-let systemPrompt = "You are a helpful assistant. If you need time to check something, respond with: [WAIT:seconds]your message. If user asks for a reminder, respond with: [REMIND:YYYY-MM-DDTHH:MM]reminder message";
+let systemPrompt = "You are a helpful assistant. If you need time to think or check something, format your response as: [WAIT:seconds]acknowledgment message|final message. Example: [WAIT:5]Let me check for you|Here is the information you requested.";
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -56,18 +56,21 @@ function showMenu() {
 
 function setSystemPrompt() {
     rl.question('Enter system prompt: ', (prompt) => {
-        systemPrompt = prompt + NL + "If you need time to check something, respond with: [WAIT:seconds]your message. If user asks for a reminder, respond with: [REMIND:YYYY-MM-DDTHH:MM]reminder message";
+        systemPrompt = prompt + NL + "If you need time to think or check something, format your response as: [WAIT:seconds]acknowledgment message|final message. Example: [WAIT:5]Let me check for you|Here is the information you requested.";
         console.log('System prompt updated');
         showMenu();
     });
 }
 
 function parseWaitResponse(response) {
-    const waitMatch = response.match(/[WAIT:(d+)]/);
+    const waitMatch = response.match(/[WAIT:(d+)]([^|]+)|(.+)/);
     if (waitMatch) {
-        const seconds = parseInt(waitMatch[1]);
-        const message = response.replace(/[WAIT:d+]/g, '').trim();
-        return { type: 'wait', seconds, message };
+        return { 
+            type: 'wait', 
+            seconds: parseInt(waitMatch[1]), 
+            ackMessage: waitMatch[2].trim(),
+            finalMessage: waitMatch[3].trim() 
+        };
     }
     return { type: 'normal', message: response };
 }
@@ -152,10 +155,10 @@ function startWhatsApp() {
             const reminderResult = parseReminderResponse(mistralResponse);
 
             if (waitResult.type === 'wait') {
-                await msg.reply("Alright, be right back, checking...");
+                await msg.reply(waitResult.ackMessage);
                 setTimeout(async () => {
                     try {
-                        const messages = waitResult.message.split(NL + NL).filter(m => m.trim().length > 0);
+                        const messages = waitResult.finalMessage.split(NL + NL).filter(m => m.trim().length > 0);
                         for (const message of messages) {
                             await msg.reply(message);
                         }
@@ -164,7 +167,7 @@ function startWhatsApp() {
                     }
                 }, waitResult.seconds * 1000);
             } else if (reminderResult) {
-                await msg.reply("Got it! I'll remind you.");
+                await msg.reply(reminderResult.message);
                 scheduleReminder(chatId, reminderResult.datetime, reminderResult.message);
             } else {
                 const messages = mistralResponse.split(NL + NL).filter(m => m.trim().length > 0);
